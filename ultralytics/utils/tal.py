@@ -89,7 +89,7 @@ class TaskAlignedAssigner(nn.Module):
 
     def get_pos_mask(self, pd_scores, pd_bboxes, gt_labels, gt_bboxes, anc_points, mask_gt):
         """Get in_gts mask, (b, max_num_obj, h*w)."""
-        mask_in_gts = self.select_candidates_in_gts(anc_points, gt_bboxes)
+        mask_in_gts = self.select_candidates_in_gts(anc_points, gt_bboxes)  # 表示anchor中心是否位于对应的ground truth bounding box内
         # Get anchor_align metric, (b, max_num_obj, h*w)
         align_metric, overlaps = self.get_box_metrics(pd_scores, pd_bboxes, gt_labels, gt_bboxes, mask_in_gts * mask_gt)
         # Get topk_metric mask, (b, max_num_obj, h*w)
@@ -103,12 +103,12 @@ class TaskAlignedAssigner(nn.Module):
         """Compute alignment metric given predicted and ground truth bounding boxes."""
         na = pd_bboxes.shape[-2]
         mask_gt = mask_gt.bool()  # b, max_num_obj, h*w
-        overlaps = torch.zeros([self.bs, self.n_max_boxes, na], dtype=pd_bboxes.dtype, device=pd_bboxes.device)
-        bbox_scores = torch.zeros([self.bs, self.n_max_boxes, na], dtype=pd_scores.dtype, device=pd_scores.device)
+        overlaps = torch.zeros([self.bs, self.n_max_boxes, na], dtype=pd_bboxes.dtype, device=pd_bboxes.device)  # torch.Size([2, 7, 8400]) * 0
+        bbox_scores = torch.zeros([self.bs, self.n_max_boxes, na], dtype=pd_scores.dtype, device=pd_scores.device)  # torch.Size([2, 7, 8400]) * 0
 
-        ind = torch.zeros([2, self.bs, self.n_max_boxes], dtype=torch.long)  # 2, b, max_num_obj
-        ind[0] = torch.arange(end=self.bs).view(-1, 1).expand(-1, self.n_max_boxes)  # b, max_num_obj
-        ind[1] = gt_labels.squeeze(-1)  # b, max_num_obj
+        ind = torch.zeros([2, self.bs, self.n_max_boxes], dtype=torch.long)  # torch.Size([2, 2, 7]) * 0 # 2, b, max_num_obj
+        ind[0] = torch.arange(end=self.bs).view(-1, 1).expand(-1, self.n_max_boxes)  # b, max_num_obj # 批次信息
+        ind[1] = gt_labels.squeeze(-1)  # b, max_num_obj # 类别信息
         # Get the scores of each grid for each gt cls
         bbox_scores[mask_gt] = pd_scores[ind[0], :, ind[1]][mask_gt]  # b, max_num_obj, h*w
 
@@ -224,9 +224,9 @@ class TaskAlignedAssigner(nn.Module):
         n_anchors = xy_centers.shape[0]
         bs, n_boxes, _ = gt_bboxes.shape
         lt, rb = gt_bboxes.view(-1, 1, 4).chunk(2, 2)  # left-top, right-bottom
-        bbox_deltas = torch.cat((xy_centers[None] - lt, rb - xy_centers[None]), dim=2).view(bs, n_boxes, n_anchors, -1)
+        bbox_deltas = torch.cat((xy_centers[None] - lt, rb - xy_centers[None]), dim=2).view(bs, n_boxes, n_anchors, -1) # 通过计算每个anchor中心与每个gt_bboxes的左上角和右下角之间的差值，以及右下角和左上角之间的差值，并将结果拼接为形状为 (bs, n_boxes, n_anchors, -1) 的张量。
         # return (bbox_deltas.min(3)[0] > eps).to(gt_bboxes.dtype)
-        return bbox_deltas.amin(3).gt_(eps)
+        return bbox_deltas.amin(3).gt_(eps)  # 计算 bbox_deltas 张量沿着第3个维度的最小值，形状为 (b, n_boxes, h*w) 的布尔型张量，表示anchor中心是否位于对应的ground truth bounding box内(最小值都为正数)
 
     @staticmethod
     def select_highest_overlaps(mask_pos, overlaps, n_max_boxes):
@@ -243,18 +243,18 @@ class TaskAlignedAssigner(nn.Module):
             mask_pos (Tensor): shape(b, n_max_boxes, h*w)
         """
         # (b, n_max_boxes, h*w) -> (b, h*w)
-        fg_mask = mask_pos.sum(-2)
+        fg_mask = mask_pos.sum(-2)  # 对 mask_pos 沿着倒数第二个维度求和，得到形状为 (b, h*w) 的张量 fg_mask，表示每个网格单元上非背景anchor box的数量
         if fg_mask.max() > 1:  # one anchor is assigned to multiple gt_bboxes
-            mask_multi_gts = (fg_mask.unsqueeze(1) > 1).expand(-1, n_max_boxes, -1)  # (b, n_max_boxes, h*w)
-            max_overlaps_idx = overlaps.argmax(1)  # (b, h*w)
+            mask_multi_gts = (fg_mask.unsqueeze(1) > 1).expand(-1, n_max_boxes, -1)  # (b, n_max_boxes, h*w) #创建一个布尔型张量 mask_multi_gts，形状为 (b, n_max_boxes, h*w)，用于指示哪些网格单元拥有多个ground truth bounding boxes
+            max_overlaps_idx = overlaps.argmax(1)  # (b, h*w)  # 获取每个网格单元上具有最高IoU的ground truth bounding box的索引，并创建一个张量 is_max_overlaps，形状与 mask_pos 相同，其中最高IoU的ground truth bounding box对应的位置上为1，其余位置为0。
 
             is_max_overlaps = torch.zeros(mask_pos.shape, dtype=mask_pos.dtype, device=mask_pos.device)
             is_max_overlaps.scatter_(1, max_overlaps_idx.unsqueeze(1), 1)
 
-            mask_pos = torch.where(mask_multi_gts, is_max_overlaps, mask_pos).float()  # (b, n_max_boxes, h*w)
+            mask_pos = torch.where(mask_multi_gts, is_max_overlaps, mask_pos).float()  # (b, n_max_boxes, h*w) # 根据 mask_multi_gts 来更新 mask_pos。对于存在多个ground truth bounding box的网格单元，将 is_max_overlaps 中对应位置的值赋给 mask_pos，以保留具有最高IoU的ground truth bounding box的匹配情况
             fg_mask = mask_pos.sum(-2)
         # Find each grid serve which gt(index)
-        target_gt_idx = mask_pos.argmax(-2)  # (b, h*w)
+        target_gt_idx = mask_pos.argmax(-2)  # (b, h*w) # 得到每个网格单元上具有最高IoU的ground truth bounding box的索引 target_gt_idx
         return target_gt_idx, fg_mask, mask_pos
 
 
